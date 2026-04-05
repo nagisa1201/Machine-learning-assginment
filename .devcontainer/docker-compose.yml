@@ -1,0 +1,46 @@
+name: machine-learning
+
+# 1. 定义公共环境变量 (Map 格式)
+x-common-env: &common_env
+  DISPLAY: ${DISPLAY}
+  NVIDIA_VISIBLE_DEVICES: all
+  NVIDIA_DRIVER_CAPABILITIES: all
+  OMP_WAIT_POLICY: passive
+  TERM: xterm-256color
+
+# 2. 定义公共配置
+x-common: &common
+  tty: true
+  network_mode: host
+  pid: "host"
+  ipc: "host"
+  privileged: true
+  user: "Nagisa"
+  stdin_open: true
+
+services:
+  machine-learning-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: nagisa/machine-learning
+    container_name: machine-learning_dev
+    <<: *common
+    environment:
+      <<: *common_env # 这里会把公共变量展开到这一层
+      PYTHONPATH: /home/Nagisa/ros2_ws/src:$$PYTHONPATH # 注意：使用 $$ 避免 Compose 报错
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /dev:/dev
+    working_dir: "/home/Nagisa/ros2_ws"
+    entrypoint:
+      - /bin/bash
+# volumes:
+#   driverLogic_volume:
+#     driver: local
+#     driver_opts:
+#       type: none
+#       device: ./..
+#       o: bind
+#     name: driverLogic_volume
