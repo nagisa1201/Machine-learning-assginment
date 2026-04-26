@@ -20,9 +20,9 @@ x-common: &common
 
 services:
   machine-learning-service:
-    build:
-      context: ..
-      dockerfile: .devcontainer/Dockerfile
+    # build:
+    #   context: ..
+    #   dockerfile: .devcontainer/Dockerfile
     image: nagisa/machine-learning:latest
     container_name: machine-learning_dev
     <<: *common

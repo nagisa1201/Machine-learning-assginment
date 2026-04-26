@@ -1,7 +1,8 @@
 # 选择 ubuntu:20.04 原生镜像
 FROM ubuntu:20.04
 ENV DEBIAN_FRONTEND=noninteractive
-
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
 # ==========================================
 # 1. 安装系统级依赖包
 # ==========================================
@@ -13,6 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-dev zlib1g-dev libjpeg-dev cmake swig \
     python3-pyglet python3-opengl libboost-all-dev libsdl2-dev \
     libosmesa6-dev patchelf ffmpeg xvfb sed ca-certificates \
+    fonts-wqy-zenhei \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # ==========================================
@@ -58,7 +60,7 @@ ENV PATH="/opt/conda/bin:$PATH"
 # 创建虚拟环境 -> 安装依赖 -> 写入 bashrc 
 RUN conda create -n ddpg -c conda-forge --override-channels python=3.6 -y && \
     conda clean -ya && \
-    /opt/conda/bin/conda run -n ddpg pip install numpy gym && \
+    /opt/conda/bin/conda run -n ddpg pip install numpy gym pandas scikit-learn matplotlib seaborn && \
     /opt/conda/bin/conda run -n ddpg pip install https://download.pytorch.org/whl/cpu/torch-0.4.1-cp36-cp36m-linux_x86_64.whl -i https://pypi.tuna.tsinghua.edu.cn/simple && \
     /opt/conda/bin/conda run -n ddpg pip install torchvision==0.2.1 && \
     echo "source /opt/conda/etc/profile.d/conda.sh" >> /home/$USERNAME/.bashrc && \

@@ -1,8 +1,8 @@
 {
-    "name": "driverLogic-container",
+    "name": "machine-learning_dev",
     "dockerComposeFile": "docker-compose.yml",
-    "service": "driverLogic-service",
-    "workspaceFolder": "/home/Elaina/ros2_ws",
+    "service": "machine-learning-service",
+    "workspaceFolder": "/home/Nagisa/Machine-learning-assginment",
     "shutdownAction": "stopCompose",
     "customizations": {
         "vscode": {
