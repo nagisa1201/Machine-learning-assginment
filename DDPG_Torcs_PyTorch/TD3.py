@@ -37,8 +37,8 @@ else:
 
 train_indicator = args.train
 
-model_dir = os.path.join('model', run_name)
-data_dir = os.path.join('data', run_name)
+model_dir = os.path.join('model_TD3', run_name)
+data_dir = os.path.join('data_TD3', run_name)
 os.makedirs(model_dir, exist_ok=True)
 os.makedirs(data_dir, exist_ok=True)
 
@@ -282,11 +282,18 @@ for i in range(2000):
             # 碰撞、冲出赛道或严重超时导致的死亡
             r_t = -10.0  
         else:
-            # 怠速惩罚：速度过低时给予持续负反馈，防止“原地苟活”
-            if ob_new.speedX < 5.0:
+            # 核心破局点：二次方速度红利
+            # 速度不到 10km/h 时，收益微乎其微；
+            # 速度达到 20km/h，每步额外加 1 分；达到 30km/h，每步额外加 2.25 分！
+            # 这会彻底打破“慢速苟活”的等式，让 Critic 明白高风险绝对伴随超高回报。
+            speed_bonus = (ob_new.speedX / 20.0) ** 2  
+            r_t += speed_bonus
+            
+            # 依然保留一点点防守底线：防止倒车或绝对静止
+            if ob_new.speedX < 2.0:
                 r_t -= 1.0
                 
-        # 3. 基础缩放 (防止 TD3 在 Q 值计算时梯度爆炸)
+        # 基础缩放
         r_t = r_t * 0.1
         # ==================================================
 
@@ -296,6 +303,7 @@ for i in range(2000):
         batch = buff.getBatch(BATCH_SIZE)
         
         q_val, c_loss, a_loss = 0, 0, 0
+
 
         # 当 Replay Buffer 凑够了一个 Batch，开始训练
         if len(batch) == BATCH_SIZE and train_indicator:
