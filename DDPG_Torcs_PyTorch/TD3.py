@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 from ReplayBuffer import ReplayBuffer
 from ActorNetwork import ActorNetwork
 from CriticNetwork import CriticNetwork
-from OU import OU
+from OU import OU 
 
 os.environ['ALSOFT_DRIVERS'] = 'null'
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf8')
@@ -47,28 +47,28 @@ print(f"📁 模型保存在: {model_dir}/")
 print(f"📊 数据保存在: {data_dir}/\n")
 
 # ==========================================
-# 2. 超参数设置 新增TD3参数
+# 2. 超参数设置
 # ==========================================
 state_size = 29
 action_size = 3
-LRA = 0.0001
-LRC = 0.001
+LRA = 0.0003          # 稍微增大 Actor 学习率以加快收敛
+LRC = 0.0003          # 统一 Critic 学习率，保持双网络更新节奏一致
 BUFFER_SIZE = 100000  
-BATCH_SIZE = 32
-GAMMA = 0.95
+BATCH_SIZE = 256      # 从 32 提升到 256，极其关键，稳定 Critic 的 Q 值估计
+GAMMA = 0.99          # 从 0.95 提升到 0.99，赋予智能体远见，让它提前踩刹车
 EXPLORE = 100000.
 epsilon = 1 if train_indicator else 0 
 TAU = 0.001
 VISION = False
 
-# --- TD3参数 ---
+# --- TD3专属参数 ---
 POLICY_FREQ = 2         # Critic 更新 2 次，Actor 更新 1 次
 POLICY_NOISE = 0.2      # 目标策略平滑噪声标准差
 NOISE_CLIP = 0.5        # 目标策略平滑噪声裁剪范围
+WARMUP_STEPS = 3000     # 开局纯随机探索步数，积累优质多样化数据
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 OU = OU()
-
 def init_weights(m):
     if type(m) == torch.nn.Linear:
         torch.nn.init.normal_(m.weight, 0, 1e-4)
@@ -161,12 +161,11 @@ class MetricsLogger:
         self.fig.savefig(os.path.join(self.save_dir, 'dynamic_metrics.png'))
 
 # ==========================================
-# TD3 网络初始化与模型加载
+# 4. TD3 网络初始化与模型加载
 # ==========================================
 actor = ActorNetwork(state_size).to(device)
 actor.apply(init_weights)
 
-# 1: 建立两个平行的 Critic 网络
 critic1 = CriticNetwork(state_size, action_size).to(device)
 critic2 = CriticNetwork(state_size, action_size).to(device)
 critic1.apply(init_weights)
@@ -201,7 +200,6 @@ target_actor.load_state_dict(actor.state_dict())
 target_critic1.load_state_dict(critic1.state_dict())
 target_critic2.load_state_dict(critic2.state_dict())
 
-# 合并优化器，同时更新两个 Critic
 optimizer_actor = torch.optim.Adam(actor.parameters(), lr=LRA)
 optimizer_critic = torch.optim.Adam(list(critic1.parameters()) + list(critic2.parameters()), lr=LRC)
 
@@ -213,9 +211,9 @@ if torch.cuda.is_available():
 logger = MetricsLogger(data_dir)
 
 # ==========================================
-# TD3 主循环
+# 5. TD3 主循环
 # ==========================================
-total_it = 0 # 记录总的更新次数，用于延迟更新
+total_it = 0 # 记录总的更新次数，用于延迟更新和热身期判定
 
 for i in range(2000):
     if np.mod(i, 3) == 0:
@@ -224,32 +222,74 @@ for i in range(2000):
         ob = env.reset()
 
     s_t = np.hstack((ob.angle, ob.track, ob.trackPos, ob.speedX, ob.speedY, ob.speedZ, ob.wheelSpinVel/100.0, ob.rpm))
-    
+
+    # 初始化回合内的防龟缩计数器和转向平顺度变量
+    low_speed_steps = 0  
+    prev_steer = 0.0
     for j in range(100000):
         if train_indicator:
             epsilon -= 1.0 / EXPLORE
             
         a_t = np.zeros([1, action_size])
-        noise_t = np.zeros([1, action_size])
-        
-        actor.eval() # 预测动作时不更新BN层等
-        with torch.no_grad():
-            a_t_original = actor(torch.tensor(s_t.reshape(1, s_t.shape[0]), device=device).float()).cpu().numpy()
-        actor.train()
+        # TD3 热身期 
+        # 前 WARMUP_STEPS 步，完全不听 Actor 网络的，使用纯随机动作探索环境
+        if train_indicator and total_it < WARMUP_STEPS:
+            a_t_original = np.zeros([1, action_size])
+            a_t_original[0][0] = np.random.uniform(-1.0, 1.0) # 随机方向盘
+            a_t_original[0][1] = np.random.uniform(0.0, 1.0)  # 随机油门
+            a_t_original[0][2] = np.random.uniform(0.0, 1.0)  # 随机刹车
+        else:
+            actor.eval()
+            with torch.no_grad():
+                a_t_original = actor(torch.tensor(s_t.reshape(1, s_t.shape[0]), device=device).float()).cpu().numpy()
+            actor.train()
 
-        # OU 探索噪声 (保持原样)
-        noise_t[0][0] = train_indicator * max(epsilon, 0) * OU.function(a_t_original[0][0], 0.0, 0.60, 0.30)
-        noise_t[0][1] = train_indicator * max(epsilon, 0) * OU.function(a_t_original[0][1], 0.5, 1.00, 0.10)
-        noise_t[0][2] = train_indicator * max(epsilon, 0) * OU.function(a_t_original[0][2], -0.1, 1.00, 0.05)
+        # ==================================================
+        # 激进型探索策略
+        # ==================================================
+        if train_indicator:
+                    noise_std = max(epsilon * 0.2, 0.05) 
+                    noise_steer = max(epsilon, 0) * OU.function(a_t_original[0][0], 0.0, 0.60, 0.30)
+                    noise_accel = np.random.normal(0.0, noise_std) 
+                    noise_brake = np.random.normal(0.0, noise_std) 
+                    
+                    a_t[0][0] = np.clip(a_t_original[0][0] + noise_steer, -1.0, 1.0)
+                    a_t[0][1] = np.clip(a_t_original[0][1] + noise_accel, 0.0, 1.0)
+                    a_t[0][2] = np.clip(a_t_original[0][2] + noise_brake, 0.0, 1.0)
+        else:
+            a_t[0][0] = a_t_original[0][0]
+            a_t[0][1] = a_t_original[0][1]
+            a_t[0][2] = a_t_original[0][2]
 
-        if train_indicator and random.random() <= 0.1:
-            noise_t[0][2] = train_indicator * max(epsilon, 0) * OU.function(a_t_original[0][2], 0.2, 1.00, 0.10)
-        
-        a_t[0][0] = np.clip(a_t_original[0][0] + noise_t[0][0], -1.0, 1.0) # Steering
-        a_t[0][1] = np.clip(a_t_original[0][1] + noise_t[0][1], 0.0, 1.0)  # Throttle
-        a_t[0][2] = np.clip(a_t_original[0][2] + noise_t[0][2], 0.0, 1.0)  # Brake
+        # 🚨 修正点 1：平滑的踏板映射逻辑，彻底移除 if-else 的强制截断
+        # 用净加速度概念来处理物理上的互斥，保证梯度的连续性
+        net_accel = a_t[0][1] - a_t[0][2]
+        a_t[0][1] = np.clip(net_accel, 0.0, 1.0)  # 净正向力作为实际油门
+        a_t[0][2] = np.clip(-net_accel, 0.0, 1.0) # 净负向力作为实际刹车
 
+        # 🚨 修正点 2：彻底删除了“强行剥夺操作权踩刹车”的破坏性逻辑
+
+        # 执行动作
         ob_new, r_t, done, info = env.step(a_t[0])
+
+        current_steer = a_t[0][0]
+        prev_steer = current_steer 
+        
+        # 🚨 修正点 3：大道至简的 Reward 机制
+        # 1. 移除了极端的平顺性惩罚 (Jerk Penalty)
+        # 2. 重新定义奖惩边界：活着并有效前进才是王道
+        if done:
+            # 碰撞、冲出赛道或严重超时导致的死亡
+            r_t = -10.0  
+        else:
+            # 怠速惩罚：速度过低时给予持续负反馈，防止“原地苟活”
+            if ob_new.speedX < 5.0:
+                r_t -= 1.0
+                
+        # 3. 基础缩放 (防止 TD3 在 Q 值计算时梯度爆炸)
+        r_t = r_t * 0.1
+        # ==================================================
+
         s_t1 = np.hstack((ob_new.angle, ob_new.track, ob_new.trackPos, ob_new.speedX, ob_new.speedY, ob_new.speedZ, ob_new.wheelSpinVel/100.0, ob_new.rpm))
 
         buff.add(s_t, a_t[0], r_t, s_t1, done)
@@ -257,6 +297,7 @@ for i in range(2000):
         
         q_val, c_loss, a_loss = 0, 0, 0
 
+        # 当 Replay Buffer 凑够了一个 Batch，开始训练
         if len(batch) == BATCH_SIZE and train_indicator:
             total_it += 1
             
@@ -266,31 +307,27 @@ for i in range(2000):
             new_states = torch.FloatTensor(np.asarray([e[3] for e in batch])).to(device)
             dones = torch.FloatTensor(np.asarray([e[4] for e in batch])).unsqueeze(1).to(device)
             
-            # ----------------------------------------------------
-            # 🌟 TD3 秘籍 3: 目标策略平滑化 (加噪并裁剪)
-            # ----------------------------------------------------
+            # TD3 3: 目标策略平滑化
             with torch.no_grad():
                 next_action = target_actor(new_states)
                 noise = torch.randn_like(next_action) * POLICY_NOISE
                 noise = noise.clamp(-NOISE_CLIP, NOISE_CLIP)
                 next_action = next_action + noise
                 
-                # 针对 TORCS 的动作空间限制进行硬裁剪
                 next_action[:, 0] = next_action[:, 0].clamp(-1.0, 1.0)
                 next_action[:, 1] = next_action[:, 1].clamp(0.0, 1.0)
                 next_action[:, 2] = next_action[:, 2].clamp(0.0, 1.0)
 
-                # 🌟 TD3 秘籍 1: 取两个 Critic 中的最小值，防止过估计
+                # TD3 1: 取两个 Critic 中的最小值
                 target_Q1 = target_critic1(new_states, next_action)
                 target_Q2 = target_critic2(new_states, next_action)
                 target_Q = torch.min(target_Q1, target_Q2)
                 target_Q = rewards + ((1.0 - dones) * GAMMA * target_Q)
 
-            # --- 更新 Critic ---
+            # 更新两个 Critic
             current_Q1 = critic1(states, actions)
             current_Q2 = critic2(states, actions)
             
-            # 使用 MSE 均方误差的均值 (mean)，防止原来 sum 导致的 Loss 飙几十万
             critic_loss = F.mse_loss(current_Q1, target_Q) + F.mse_loss(current_Q2, target_Q)
             
             optimizer_critic.zero_grad()
@@ -300,12 +337,8 @@ for i in range(2000):
             c_loss = critic_loss.item()
             q_val = current_Q1.mean().item()
 
-            # ----------------------------------------------------
-            # 🌟 TD3 秘籍 2: 延迟策略更新
-            # ----------------------------------------------------
+            # TD3 2: 延迟策略更新
             if total_it % POLICY_FREQ == 0:
-                # --- 更新 Actor ---
-                # 用 critic1 评价当前 actor 的表现，并使其最大化 (加负号最小化)
                 actor_loss = -critic1(states, actor(states)).mean()
                 
                 optimizer_actor.zero_grad()
@@ -314,7 +347,7 @@ for i in range(2000):
                 
                 a_loss = actor_loss.item()
 
-                # --- 软更新目标网络 ---
+                # 软更新
                 for param, target_param in zip(critic1.parameters(), target_critic1.parameters()):
                     target_param.data.copy_(TAU * param.data + (1 - TAU) * target_param.data)
 
@@ -331,8 +364,15 @@ for i in range(2000):
             break
 
     total_reward = logger.end_episode(i, ob_new)
+    
+    # 加入热身期的屏幕显示
+    if total_it < WARMUP_STEPS and train_indicator:
+        warmup_status = f"[热身阶段: 正在随机积累数据... {total_it}/{WARMUP_STEPS}]"
+    else:
+        warmup_status = ""
+        
     print(f"=====================================================")
-    print(f"🏁 Episode {i} | Run: {run_name} | Reward: {total_reward:.2f} | Steps: {logger.history['Steps'][-1]}")
+    print(f"🏁 Episode {i} | Run: {run_name} | Reward: {total_reward:.2f} | Steps: {logger.history['Steps'][-1]} {warmup_status}")
     print(f"   Avg Q: {logger.history['Avg_Q'][-1]:.2f} | Critic Loss: {logger.history['Critic_Loss'][-1]:.2f}")
     print(f"   Steer Jerk: {logger.history['Steering_Jerk'][-1]:.4f} | Avg Speed: {logger.history['Avg_Speed(km/h)'][-1]:.1f} km/h")
     print(f"=====================================================\n")
