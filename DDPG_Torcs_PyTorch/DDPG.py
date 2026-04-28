@@ -39,8 +39,8 @@ else:
 train_indicator = args.train
 
 # 动态生成本次实验专属的文件夹路径
-model_dir = os.path.join('model', run_name)
-data_dir = os.path.join('data', run_name)
+model_dir = os.path.join('model_DDPG', run_name)
+data_dir = os.path.join('data_DDPG', run_name)
 os.makedirs(model_dir, exist_ok=True)
 os.makedirs(data_dir, exist_ok=True)
 

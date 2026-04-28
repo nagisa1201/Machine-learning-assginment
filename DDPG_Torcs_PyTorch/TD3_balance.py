@@ -57,7 +57,7 @@ BUFFER_SIZE = 100000
 BATCH_SIZE = 256      
 GAMMA = 0.99          
 EXPLORE = 100000.
-epsilon = 1 if train_indicator else 0 
+epsilon = 0.2 if train_indicator else 0
 TAU = 0.001
 VISION = False
 
@@ -65,7 +65,7 @@ VISION = False
 POLICY_FREQ = 2         
 POLICY_NOISE = 0.2      
 NOISE_CLIP = 0.5        
-WARMUP_STEPS = 5000     # [已修正] 增加热身步数，确保有足够的起步探索数据
+WARMUP_STEPS = 1000
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 OU = OU()
@@ -174,7 +174,7 @@ critic2.apply(init_weights)
 print("正在检查历史模型权重...")
 actor_path = os.path.join(model_dir, 'actormodel.pth')
 critic1_path = os.path.join(model_dir, 'critic1model.pth')
-critic2_path = os.path.join(model_dir, 'critic2model.pth')
+critic2_path = os.path.join(model_dir, 'criti积累基础动力学数据.c2model.pth')
 
 try:
     actor.load_state_dict(torch.load(actor_path))
@@ -214,7 +214,6 @@ logger = MetricsLogger(data_dir)
 # 5. TD3 主循环
 # ==========================================
 total_it = 0 
-
 for i in range(2000):
     if np.mod(i, 3) == 0:
         ob = env.reset(relaunch=True)
@@ -225,7 +224,7 @@ for i in range(2000):
 
     low_speed_steps = 0  
     prev_steer = 0.0
-
+    
     for j in range(100000):
         if train_indicator:
             epsilon -= 1.0 / EXPLORE
@@ -233,15 +232,16 @@ for i in range(2000):
         a_t = np.zeros([1, action_size])
         
         # ==================================================
-        # [已修正] 热身期强制破冰与平滑防蠕动
+        # 受控热身，解决热身龟缩与过度撞墙
         # ==================================================
         if train_indicator and total_it < WARMUP_STEPS:
             a_t_original = np.zeros([1, action_size])
-            # OU平滑转向防原地抽搐
-            a_t_original[0][0] = np.clip(OU.function(prev_steer, 0.0, 0.15, 0.25), -1.0, 1.0)
-            # 强制给油防挂机
-            a_t_original[0][1] = np.random.uniform(0.5, 1.0)  
-            a_t_original[0][2] = np.random.uniform(0.0, 0.1) 
+            a_t_original[0][0] = np.clip(np.random.normal(0.0, 0.2), -1.0, 1.0) 
+            a_t_original[0][1] = np.random.uniform(0.2, 0.8)  
+            if np.random.rand() < 0.1:
+                a_t_original[0][2] = np.random.uniform(0.1, 0.5)
+            else:
+                a_t_original[0][2] = 0.0
         else:
             actor.eval()
             with torch.no_grad():
@@ -262,45 +262,67 @@ for i in range(2000):
             a_t[0][1] = a_t_original[0][1]
             a_t[0][2] = a_t_original[0][2]
 
-        # [已修正] 平滑的踏板映射逻辑，物理互斥
+        # 净加速度概念：处理物理踏板互斥，平滑梯度
         net_accel = a_t[0][1] - a_t[0][2]
         a_t[0][1] = np.clip(net_accel, 0.0, 1.0)  
         a_t[0][2] = np.clip(-net_accel, 0.0, 1.0) 
 
         # 执行动作
         ob_new, r_t, done, info = env.step(a_t[0])
-
         current_steer = a_t[0][0]
         prev_steer = current_steer 
         
         # ==================================================
-        # [已修正] 终极生死审判与有效推进奖励逻辑
+        # 【破局点 3, 4, 5：终极奖励整形 (Reward Shaping)】
         # ==================================================
-        is_off_track = abs(ob_new.trackPos) > 1.0  
-        is_backward = abs(ob_new.angle) > 1.57 
-
-        if ob_new.speedX < 5.0:
-            low_speed_steps += 1
+        if done:
+            r_t = -300.0  
         else:
-            low_speed_steps = 0
+            v_kmh = ob_new.speedX * 300.0        
+            angle_rad = ob_new.angle * np.pi     
+            track_pos = ob_new.trackPos          
+            v_effective = min(v_kmh, 90.0)
             
-        is_stuck = low_speed_steps > 150 
+            progress_reward = v_effective * np.cos(angle_rad)
+            track_penalty = (track_pos ** 2) * 30.0 
+            angle_penalty = np.abs(np.sin(angle_rad)) * 30.0
 
-        # 统一死刑标准，无缝隙封堵摆烂漏洞
-        if done or is_off_track or is_backward or is_stuck:
-            done = True       
-            r_t = -200.0      
-        else:
-            # 引入有效推进速度
-            progress_speed = ob_new.speedX * np.cos(ob_new.angle)
-            speed_bonus = np.clip(progress_speed / 30.0, 0.0, 10.0) 
+            if v_kmh < 5.0:  
+                slow_penalty = 5.0
+            else:
+                slow_penalty = 0.0
             
-            track_penalty = abs(ob_new.trackPos) * 1.5 
-            r_t = speed_bonus - track_penalty
-
-            # 起步破冰奖励
-            if ob.speedX < 5.0 and ob_new.speedX >= 5.0 and not is_backward:
-                r_t += 5.0
+            # --- 破局点：基于距离的动态速度区间控制 ---
+            front_dist = ob_new.track[9] if hasattr(ob_new, 'track') else 1.0
+            corner_speed_penalty = 0.0
+            
+            # 假设 front_dist < 0.3 代表即将入弯或前方有墙（TORCS 中 1.0 通常代表 200 米，0.3 即 60 米）
+            if front_dist < 0.3:
+                target_min = 40.0
+                target_max = 50.0
+                
+                if v_kmh > target_max:
+                    # 速度过高：偏离越多，惩罚越重（二次方增长，严厉打击入弯不减速）
+                    excess_speed = v_kmh - target_max
+                    corner_speed_penalty = (excess_speed ** 2) * 0.05 
+                elif v_kmh < target_min:
+                    # 速度过低：给予线性惩罚，防止完全停下或过度龟缩
+                    deficit_speed = target_min - v_kmh
+                    corner_speed_penalty = deficit_speed * 0.5
+                else:
+                    # 完美落在 40-50 区间：给予奖励（在最终计算时表现为减去负值，即加分）
+                    corner_speed_penalty = -20.0 
+            
+            # 如果在直道上（front_dist 很大），但速度极慢，依然保留你原来的慢速惩罚
+            slow_penalty = 20.0 if (v_kmh < 5.0 and front_dist > 0.3) else 0.0
+                
+            understeer_penalty = (current_steer ** 2) * (v_kmh / 50.0) * 5.0
+            
+            # 更新最终的奖励计算
+            r_t = progress_reward - track_penalty - angle_penalty - slow_penalty - corner_speed_penalty - understeer_penalty
+            r_t = np.clip(r_t, -50.0, 100.0)
+                
+        r_t = r_t * 0.02
         # ==================================================
 
         s_t1 = np.hstack((ob_new.angle, ob_new.track, ob_new.trackPos, ob_new.speedX, ob_new.speedY, ob_new.speedZ, ob_new.wheelSpinVel/100.0, ob_new.rpm))
@@ -310,7 +332,6 @@ for i in range(2000):
         
         q_val, c_loss, a_loss = 0, 0, 0
 
-        # 当凑够了一个 Batch 开始训练
         if len(batch) == BATCH_SIZE and train_indicator:
             total_it += 1
             
@@ -320,30 +341,23 @@ for i in range(2000):
             new_states = torch.FloatTensor(np.asarray([e[3] for e in batch])).to(device)
             dones = torch.FloatTensor(np.asarray([e[4] for e in batch])).unsqueeze(1).to(device)
             
-            # TD3 3: 目标策略平滑化
             with torch.no_grad():
                 next_action = target_actor(new_states)
                 noise = torch.randn_like(next_action) * POLICY_NOISE
                 noise = noise.clamp(-NOISE_CLIP, NOISE_CLIP)
                 next_action = next_action + noise
                 
+                # 【修复 1】: 计算 Target Q 时，也必须强制遵循物理踏板互斥逻辑
                 next_action[:, 0] = next_action[:, 0].clamp(-1.0, 1.0)
-                
-                # ==================================================
-                # [已修正] Target Action 同步互斥，彻底消除Q值幻觉
-                # ==================================================
-                net_next_accel = next_action[:, 1] - next_action[:, 2]
-                next_action[:, 1] = torch.clamp(net_next_accel, 0.0, 1.0)
-                next_action[:, 2] = torch.clamp(-net_next_accel, 0.0, 1.0)
-                # ==================================================
+                net_accel_tgt = next_action[:, 1] - next_action[:, 2]
+                next_action[:, 1] = torch.clamp(net_accel_tgt, 0.0, 1.0)
+                next_action[:, 2] = torch.clamp(-net_accel_tgt, 0.0, 1.0)
 
-                # TD3 1: 取两个 Critic 中的最小值
                 target_Q1 = target_critic1(new_states, next_action)
                 target_Q2 = target_critic2(new_states, next_action)
                 target_Q = torch.min(target_Q1, target_Q2)
                 target_Q = rewards + ((1.0 - dones) * GAMMA * target_Q)
 
-            # 更新两个 Critic
             current_Q1 = critic1(states, actions)
             current_Q2 = critic2(states, actions)
             
@@ -356,9 +370,16 @@ for i in range(2000):
             c_loss = critic_loss.item()
             q_val = current_Q1.mean().item()
 
-            # TD3 2: 延迟策略更新
             if total_it % POLICY_FREQ == 0:
-                actor_loss = -critic1(states, actor(states)).mean()
+                # 【修复 2】: 计算 Actor Loss 时，通过互斥过滤器让梯度反向传播
+                raw_actions = actor(states)
+                steer = raw_actions[:, 0:1]
+                net_acc = raw_actions[:, 1:2] - raw_actions[:, 2:3]
+                gas = torch.clamp(net_acc, 0.0, 1.0)
+                brake = torch.clamp(-net_acc, 0.0, 1.0)
+                filtered_actions = torch.cat([steer, gas, brake], dim=1)
+
+                actor_loss = -critic1(states, filtered_actions).mean()
                 
                 optimizer_actor.zero_grad()
                 actor_loss.backward()
@@ -366,7 +387,6 @@ for i in range(2000):
                 
                 a_loss = actor_loss.item()
 
-                # 软更新
                 for param, target_param in zip(critic1.parameters(), target_critic1.parameters()):
                     target_param.data.copy_(TAU * param.data + (1 - TAU) * target_param.data)
 
@@ -384,9 +404,8 @@ for i in range(2000):
 
     total_reward = logger.end_episode(i, ob_new)
     
-    # 屏幕显示热身状态
     if total_it < WARMUP_STEPS and train_indicator:
-        warmup_status = f"[热身阶段: 正在强制破冰并积累数据... {total_it}/{WARMUP_STEPS}]"
+        warmup_status = f"[受控热身: 积累基础动力学数据... {total_it}/{WARMUP_STEPS}]"
     else:
         warmup_status = ""
         
