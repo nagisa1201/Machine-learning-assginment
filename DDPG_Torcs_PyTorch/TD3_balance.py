@@ -276,7 +276,7 @@ for i in range(2000):
         # 【破局点 3, 4, 5：终极奖励整形 (Reward Shaping)】
         # ==================================================
         if done:
-            r_t = -300.0  
+            r_t = -1000.0  
         else:
             v_kmh = ob_new.speedX * 300.0        
             angle_rad = ob_new.angle * np.pi     
@@ -288,7 +288,7 @@ for i in range(2000):
             angle_penalty = np.abs(np.sin(angle_rad)) * 30.0
 
             if v_kmh < 5.0:  
-                slow_penalty = 5.0
+                slow_penalty = 30.0
             else:
                 slow_penalty = 0.0
             
@@ -314,7 +314,7 @@ for i in range(2000):
                     corner_speed_penalty = -20.0 
             
             # 如果在直道上（front_dist 很大），但速度极慢，依然保留你原来的慢速惩罚
-            slow_penalty = 20.0 if (v_kmh < 5.0 and front_dist > 0.3) else 0.0
+            slow_penalty = 50.0 if (v_kmh < 5.0 and front_dist > 0.3) else 0.0
                 
             understeer_penalty = (current_steer ** 2) * (v_kmh / 50.0) * 5.0
             
