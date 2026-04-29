@@ -1,6 +1,9 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import sys
+import io
+import os
 from sklearn.datasets import fetch_openml
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
@@ -8,6 +11,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_squared_error, r2_score
 
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 plt.rcParams['font.sans-serif'] = ['WenQuanYi Zen Hei'] 
 plt.rcParams['axes.unicode_minus'] = False
 plt.rcParams['font.size'] = 14          # 全局默认字体大小
@@ -85,4 +89,16 @@ plt.xlabel('真实房价')
 plt.ylabel('预测房价')
 
 plt.tight_layout()
+# ==================================
+# 定义保存目录的路径
+save_dir = os.path.join('result', 'origin')
+# 如果目录不存在，则创建该目录（包括父目录 result 也会一并创建）
+if not os.path.exists(save_dir):
+    os.makedirs(save_dir)
+# 拼接完整的文件保存路径
+save_path = os.path.join(save_dir, 'model_comparison.png')
+plt.savefig(save_path, dpi=300, bbox_inches='tight')
+
+print(f"\n对比图表已成功保存至: {save_path}")
+# ================================================
 plt.show()
